@@ -4,6 +4,7 @@ import path from "path";
 import axios from "axios";
 import dotenv from "dotenv";
 import cors from "cors";
+import fs from "fs";
 
 dotenv.config();
 
@@ -1663,13 +1664,62 @@ async function startServer() {
     }
   }, 600000);
 
+  let viteInstance: any = null;
+
+  const getDynamicFirebaseConfigScript = () => {
+    const config = {
+      apiKey: process.env.VITE_FIREBASE_API_KEY || "",
+      authDomain: process.env.VITE_FIREBASE_AUTH_DOMAIN || `${process.env.VITE_FIREBASE_PROJECT_ID}.firebaseapp.com`,
+      projectId: process.env.VITE_FIREBASE_PROJECT_ID || "",
+      storageBucket: process.env.VITE_FIREBASE_STORAGE_BUCKET || `${process.env.VITE_FIREBASE_PROJECT_ID}.appspot.com`,
+      messagingSenderId: process.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "",
+      appId: process.env.VITE_FIREBASE_APP_ID || "",
+      databaseId: process.env.VITE_FIREBASE_DATABASE_ID || "(default)",
+    };
+    return `<script>
+      window.__FIREBASE_CONFIG__ = ${JSON.stringify(config)};
+    </script>`;
+  };
+
+  // Intercept HTML requests to inject real-time environment variables dynamic config
+  app.use(async (req, res, next) => {
+    if (req.path.startsWith("/api/")) {
+      return next();
+    }
+
+    // Is it an HTML route or root navigation?
+    if (req.path === "/" || req.path === "/index.html" || (!req.path.includes(".") && req.headers.accept?.includes("text/html"))) {
+      try {
+        const isDev = process.env.NODE_ENV !== "production";
+        const templatePath = isDev 
+          ? path.join(process.cwd(), 'index.html') 
+          : path.join(process.cwd(), 'dist', 'index.html');
+        
+        let html = await fs.promises.readFile(templatePath, "utf-8");
+        
+        if (isDev && viteInstance) {
+          html = await viteInstance.transformIndexHtml(req.url, html);
+        }
+        
+        const configScript = getDynamicFirebaseConfigScript();
+        html = html.replace("<head>", `<head>\n    ${configScript}`);
+        
+        res.setHeader("Content-Type", "text/html");
+        return res.status(200).send(html);
+      } catch (err: any) {
+        console.error("Error serving index.html dynamically:", err.message);
+      }
+    }
+    next();
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
+    viteInstance = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
-    app.use(vite.middlewares);
+    app.use(viteInstance.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
